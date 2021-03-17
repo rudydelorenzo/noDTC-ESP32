@@ -8,7 +8,7 @@
 #define SLEEP_AFTER_SCAN 10 		/* Seconds */
 
 const char *ssid = "WiFi-OBDII";
-int codes[] = {0000, 0741, 1525};
+int codes[] = {0741, 1525};
 
 bool clear = false;
 bool debug = true;
@@ -19,8 +19,10 @@ void setup() {
         esp_sleep_enable_timer_wakeup(DEEP_SLEEP_TIME * uS_TO_S_FACTOR);
 
         // Start serial (for debugging)
-        Serial.begin(115200);
-        while (!Serial);
+	if (debug) {
+		Serial.begin(115200);
+		while (!Serial);
+	}
 
         // Connect to WiFi
         if (debug) {
@@ -59,9 +61,32 @@ void setup() {
         }
 }
 
+
+String removeAlpha(String s) {
+        for (int i = 0; i < s.length(); i++) {
+                char c = s[i];
+                if (!isDigit(c)) {
+                        s.remove(i, 1);
+                        i--;
+                }
+        }
+        return s;
+}
+
+
+void extract(String s, LinkedList<int>* c) {
+  for (int i = 0; i + 4 <= s.length(); i = i + 4) {
+    if (s[i] == '4') i = i - 2;
+    else {
+      c->add(s.substring(i, i + 4).toInt());
+    }
+  }
+}
+
+
 void loop() {
 	// Codes list will hold all values returned from the car, even 0000s
-        LinkedList<int> codes = LinkedList<int>();
+        LinkedList<int> presentCodes = LinkedList<int>();
 
         // Good practice to always ensure that ELM is connected
         if (!ELM.connected()) {
@@ -78,32 +103,43 @@ void loop() {
                 ESP.restart();
         }
 
+	String confirmed = "";
+	String pending = "";
         if (status.substring(6, 7).equals("8")) {
                 // CEL is on
-                String confirmedCodes = ELM.send("03");
-                for (int i = 0; i < confirmedCodes.length(); i++) {
-                        Serial.println((char)confirmedCodes[i]);
-                        Serial.println((int)confirmedCodes[i]);
-                        Serial.println();
-                }
-                // String code1 = rawCodes.substring(3, 8);
-                // String code2 = rawCodes.substring(25, 30);
+                confirmed = removeAlpha(ELM.send("03"));
         } else if (status.substring(6, 7).equals("0")) {
-                String pending = ELM.send("07");
-                clear = true;
-                String code1 = pending.substring(3, 8);
-                String code2 = pending.substring(25, 30);
-                if (!(code1.equals("00 00") || code1.equals("07 41") ||
-                      code1.equals("15 25")))
-                        clear = false;
-                if (!(code2.equals("00 00") || code2.equals("07 41") ||
-                      code2.equals("15 25")))
-                        clear = false;
-        }
+                pending = removeAlpha(ELM.send("07"));
+        } else {
+		// If the value is anything other than 8 oe 0 something is wrong
+		if (debug) Serial.println("NONSENSE RECEIVED FOR STATUS - RESET!");
+		ELM.stop();
+		ESP.restart();
+	}
 
 	// Determine if codes should be cleared
 	clear = false;
+	bool allZeros = true;	// Signals if everything is 0, in that case we don't clear
+	extract(confirmed, &presentCodes);
+	extract(pending, &presentCodes);
 
+        for (int i = 0; i < presentCodes.size(); i++) {
+                if (presentCodes.get(i) != 0) allZeros = false;
+                else continue;
+
+                // If you get here, we have a legitimate code
+                bool match = false;
+                for (int j = 0; j < (sizeof(codes) / sizeof(codes[0])); j++) {
+                        if (presentCodes.get(i) == codes[j]) match = true;
+                }
+                if (!match) {
+                        clear = false;
+                        break;
+                }
+                clear = true;
+        }
+
+        if (allZeros) clear = false;
 
 	// Clear codes if necessary
         if (clear) {
@@ -115,15 +151,4 @@ void loop() {
         // TODO: use TaskScheduler
         if (debug) Serial.println("DONE! SLEEPING FOR 10 SEC...");
         delay(SLEEP_AFTER_SCAN * 1000);
-}
-
-String removeAlpha(String s) {
-        for (int i = 0; i < s.length(); i++) {
-                char c = s[i];
-                if (!isDigit(c)) {
-                        s.remove(i, 1);
-                        i--;
-                }
-        }
-        return s;
 }
